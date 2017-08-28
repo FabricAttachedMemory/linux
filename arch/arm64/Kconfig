@@ -539,6 +539,16 @@ config QCOM_QDF2400_ERRATUM_0065
 
 	  If unsure, say Y.
 
+config BRCM_ERRATUM_SPI128
+	bool "Broadcom erratum SPI128: Limit to 128 SPI interrupts"
+	default y
+	help
+	  The gicv3 of Vulcan must be restricted to a max of
+	  128 SPI interrupts to prevent unsupported transactions
+	  going to the Zbridge in The Machine nodes.
+
+	  If unsure, say Y.
+
 endmenu
 
 

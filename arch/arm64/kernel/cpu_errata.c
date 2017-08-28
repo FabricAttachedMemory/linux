@@ -187,6 +187,14 @@ const struct arm64_cpu_capabilities arm64_errata[] = {
 		MIDR_ALL_VERSIONS(MIDR_CORTEX_A73),
 	},
 #endif
+#ifdef CONFIG_BRCM_ERRATUM_SPI128
+        {
+        /* Broadcom Vulcan, A0 - A1 */
+                .desc = "Vulcan erratum SPI128",
+                .capability = ARM64_WORKAROUND_VULCAN_SPI128,
+                MIDR_RANGE(MIDR_VULCAN, 0x00, 0x01),
+        },
+#endif
 	{
 	}
 };

@@ -963,6 +963,29 @@ static const struct irq_domain_ops partition_domain_ops = {
 	.select = gic_irq_domain_select,
 };
 
+static int gicd_typer_irqs(u32 typer)
+{
+        int gic_irqs = GICD_TYPER_IRQS(typer);
+
+        if (cpus_have_const_cap(ARM64_WORKAROUND_VULCAN_SPI128)) {
+                /*
+                * DO NOT UPSTREAM.
+                *
+                * HACK to limit the number of SPI irqs to 128, as this prevents the
+                * GIC on TM SoC from sending messages to remote GICS that don't
+                * exist in our setup.  Note that 128 is the number of actual irqs
+                * that exist in our setup, so we are not losing any functionality.
+                */
+                pr_info("GIC: GIC reports %d SPI irqs\n", gic_irqs);
+                if (gic_irqs > 128) {
+                        pr_info("GIC HACK: Limiting to 128 SPI interrupts to prevent ICI messages.\n");
+                        gic_irqs = 128;
+                }
+        }
+
+        return gic_irqs;
+}
+
 static int __init gic_init_bases(void __iomem *dist_base,
 				 struct redist_region *rdist_regs,
 				 u32 nr_redist_regions,
@@ -991,7 +1014,7 @@ static int __init gic_init_bases(void __iomem *dist_base,
 	 */
 	typer = readl_relaxed(gic_data.dist_base + GICD_TYPER);
 	gic_data.rdists.id_bits = GICD_TYPER_ID_BITS(typer);
-	gic_irqs = GICD_TYPER_IRQS(typer);
+	gic_irqs = gicd_typer_irqs(typer);
 	if (gic_irqs > 1020)
 		gic_irqs = 1020;
 	gic_data.irq_nr = gic_irqs;
