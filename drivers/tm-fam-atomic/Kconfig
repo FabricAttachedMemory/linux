@@ -1,0 +1,8 @@
+config FAM_ATOMIC_DRIVER
+	tristate "FAM_ATOMIC_DRIVER - The Machine FAM atomic support"
+	depends on TMFS
+	default m
+	help
+	  Enable this to support using FAM atomic operations on
+	  The Machine. This module is used by the libfam-atomic
+	  userspace library.
