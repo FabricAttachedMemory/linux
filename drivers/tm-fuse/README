@@ -1,0 +1,67 @@
+---------------------------------------------------------------------------
+Steps to port the 4.5.2 kernel version of fuse to tm-fuse
+---------------------------------------------------------------------------
+
++ get source files for target kernel (<source>/fs/fuse)
+
++ check Makefile and Kconfig for any new functionality that might need to be ported forward
++ check for any new FUSE files that might need to be incorporated
+
+$ rm Makefile Kconfig
+$ mv fuse_i.h tmfs_i.h
+$ mv cuse.c tmcd.c
+$ cp /lib/modules/<kernel_version>/build/include/uapi/linux/fuse.h ./tmfs.h
+  OR
+$ cp <kernel_source>/include/uapi/linux/fuse.h ./tmfs.h
+
+do.replace:
+sed -i s/fuse/tmfs/g $1
+sed -i s/FUSE/TMFS/g $1
+sed -i s/cuse/tmcd/g $1
+sed -i s/CUSE/TMCD/g $1
+
+$ do.replace control.c
+$ do.replace dev.c
+$ do.replace dir.c
+$ do.replace file.c
+$ do.replace inode.c
+$ do.replace tmcd.c
+$ do.replace tmfs.h
+$ do.replace tmfs_i.h
+$ do.replace xattr.c
+$ do.replace acl.c
+
++ fix "do.replace" fubar in dev.c:
+$ sed -i 's/ECONNRETMFSD/ECONNREFUSED/g' dev.c
+
+# From previous version of tm-fuse:
++ get Makefile
++ get Kconfig
++ get lfs.c
++ get file_lfs.c
++ get lfs_book2lza.c
++ get debian/*
++ README
++ README.dkms  # while using DKMS for packaging
++ get dkms.conf  # while using DKMS for packaging
+
++ edit tmfs_i.h and add the following three lines:
+/** These should be in <build>/include/linux/miscdevice.h */
+#define TMFS_MINOR 240
+#define TMCD_MINOR 241
+
++ edit tmfs_i.h and tmcd.c and change: 
+$ tmfs_i.h : #include <linux/tmfs.h> --> #include "tmfs.h"
+$ tmcd.c   : #include <linux/tmfs.h> --> #include "tmfs.h"
+
++ Merge in other LFS changes, these should all be commented with "LFS"
++ Grab a copy of the original FUSE files, run the do.replace on these
++ files, then compare with the tm-fuse versions to find LFS related
++ code that needs to be merged in.
+
++ As of the port to 4.13 the following files had changes
++ dir.c
++ file.c
++ inode.c
++ tmcd.c
++ tmfs_i.h

@@ -1,0 +1,6 @@
+config TMFS
+	tristate "TMFS - The Machine Librarian File System support"
+	depends on ZBRIDGE && FLUSHTM
+	default m
+	help
+	  In order to run the Librarian File System (LFS) client answer Y or M.
