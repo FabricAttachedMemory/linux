@@ -1,0 +1,5 @@
+config FLUSHTM
+  tristate "FLUSHTM - Driver to flush cache on The Machine"
+  default m
+  help
+    Needed bt The Machine to flush and persist memory

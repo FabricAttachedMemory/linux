@@ -1,0 +1,124 @@
+# Link cache flushing routines into several notifier chains, and provide
+# general flush support.
+
+# Uncomment this for an explicit path to kernel source
+# BUILD:=${HOME}/some/symlink
+
+DRIVERNAME := flushtm
+DRIVER := ${DRIVERNAME}.ko
+
+first:
+	@echo "make targets are 'callgraph' 'clean' 'module' 'help' 'tarball'"
+
+help:	first
+	@echo "\n\
+callgraph: create a PNG of function call flow\n\
+           needs package 'graphviz' and /usr/local/bin/egypt (ask Rocky)\n\n\
+clean: remove ${DRIVER}, build artificats, and callgraph\n\n\
+module: compile (changed) sources, (re)build local symbol table, link\n\
+        needs sudo access to read /proc/kallsyms and create ${DRIVER}\n\n\
+help: you're reading it\n\n\
+install: copy ${DRIVER} to /lib/modules/.... so "modprobe ${DRIVERNAME}" works\n\n\
+tarball: first a clean, then create a relative tarball of this directory\n\
+"
+
+###########################################################################
+# Don't change anything after this point, or you own the project :-)
+
+OBJS := flushtm_base.o flushtm_x86.o flushtm_arm.o
+${DRIVERNAME}-y := ${OBJS}
+
+obj-m += ${DRIVERNAME}.o
+
+UNAME_R:=$(shell uname -r)
+BUILD?=/lib/modules/${UNAME_R}/build
+
+clean:
+	make -C ${BUILD} M=${PWD} clean
+	@rm -f ${LOCALMAP} ${RESOLVED} ${UNRESOLVED} ${DOT} ${PNG} ${TGZ} *.expand
+
+###########################################################################
+# Yes it builds the module, but it has unresolved symbols into the kernel.
+# TODO: look into KBUILD_EXTRA_SYMBOLS, see Documentation/kbuild/modules.txt
+
+UNRESOLVED := temp.ko
+
+${UNRESOLVED}:	Makefile
+	@rm -f $@
+	make -C ${BUILD} M=${PWD} V=0 modules
+	@mv ${DRIVER} ${UNRESOLVED} 2>/dev/null
+
+###########################################################################
+# Either get the map from kallsyms (best) or /boot/System.map... (bleah)
+
+LOCALMAP := local.map
+SYSTEMMAP:= /boot/System.map-${UNAME_R}
+
+${LOCALMAP}:
+	@rm -f $@
+	@echo
+	@if sudo cp /proc/kallsyms ${LOCALMAP}; then true; else \
+		cp ${SYSTEMMAP} junk; \
+		@sort -u < junk > ${LOCALMAP} && rm -f junk; \
+	fi
+	
+###########################################################################
+# Resolve the missing symbols from an explicit list.  The output file
+# is actually a linker script (ie, text file of linker commands).
+
+RESOLVED := resolved.lds
+
+EXTERN := 
+
+${RESOLVED}:	${LOCALMAP}
+	@echo "_ = 0x0;" >  ${RESOLVED}
+	@[ "${EXTERN}" ] && echo Resolving ${EXTERN} || return 0
+	@for E in ${EXTERN}; do \
+	    # echo Resolving $$E; \
+	    awk -v PAT="$${E}" \
+	    	'BEGIN { VALUE="0" } \
+		 PAT == $$3 { VALUE=$$1 } \
+		 END { printf "%s = 0x%s;\n", PAT, VALUE }' \
+		${LOCALMAP} >> ${RESOLVED}; \
+	done
+
+module:	Makefile ${UNRESOLVED} ${RESOLVED}
+	ld -r -o ${DRIVER} ${UNRESOLVED} ${RESOLVED}
+	@echo "${DRIVER} is ready; unresolved (yet expected) symbols:" 
+	@nm ${DRIVERNAME}.ko | grep "0000000000000000 A " | cut -d' ' -f3
+
+# depmod needs to be run manually if INSTALL_MOD_DIR is used.
+
+install:	module
+	@sudo INSTALL_MOD_DIR=L4TM make -C ${BUILD} M=${PWD} V=0 modules_install
+	@sudo depmod -a
+
+###########################################################################
+# Needs "egypt" from http://rocky84.americas.hpqcorp.net/egypt and
+# optionally "dot" to finish it off.
+
+DOT := ${DRIVERNAME}.dot
+PNG := ${DRIVERNAME}.png
+VIEWER:=shotwell
+
+# INCEXT:=--include-external
+OMITS:=--omit printk
+CLUDES:=${INCEXT} ${OMITS}
+
+callgraph:	clean
+	@[ "`which egypt`" ] && true || (echo "No pyramids" >&2 && false)
+	@make -C ${BUILD} \
+		CFLAGS_MODULE="-DCALLGRAPH -dx -fdump-rtl-expand" \
+		M=${PWD} modules
+	@egypt --color --title "flushtm" ${CLUDES} *.expand > ${DOT} 2>/dev/null
+	@[ "`which dot`" ] && dot -Tpng -o ${PNG} ${DOT} || echo "No dot" >&2
+	@[ "`which ${VIEWER}`" ] && ${VIEWER} ${PNG} || echo "No ${VIEWER}" >&2
+	
+###########################################################################
+
+TGZ:=${DRIVERNAME}.tgz
+
+tarball:	clean
+	@tar -C .. -zcvf "/tmp/${TGZ}" --exclude \.git `basename "${CURDIR}"`
+	@mv "/tmp/${TGZ}" .
+	@/bin/echo -e "\n${TGZ} is now in the current directory\n"

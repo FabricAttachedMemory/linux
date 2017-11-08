@@ -1,0 +1,135 @@
+flushtm - Clearinghouse for cache flushing on The Machine
+Rocky Craig June 2016
+
+There are many times when the processor caches of The Machine which are
+mapped to NVM will need to be flushed and/or invalidated.  flushtm is 
+evolution of work done by HP Labs Brazil in 2014 concerning flush on panic.
+They created a kernel patch set (see the file brazil.patch) which targetted
+
+1. half a dozen source files in the 3.18 kernel (with DAX patches)
+2. mixed x86 (for QEMU work) and ARM via inline #ifdef
+3. panic and reboot coverage
+4. process exit
+
+The patch set was abandoned in the spring of 2014 in the hopes that
+the L4TM team would continue development.  We did.
+
+L4TM is now based on kernel 4.x which includes the DAX feature (among
+other things :-) so this patch set is obsolete.  Furthermore, it is
+rather unwieldy to carry forward.  flushtm is written as a kernel
+module that captures the functionality in a more extensible fashion
+yielding better encapsulation of development efforts.
+
+If necessary it can provide support routines for other modules that need
+cache flush support.  It is speculated/desired that flushtm may fold 
+into other discrete kernel modules currently being developed, such as
+res2hot, the Zbridge driver, or kernel component of aperture management.
+Time will tell.
+
+The following sections show how flushtm addresses the concerns of the
+Brazil patch.
+
+---------------------------------------------------------------------------
+IFDEFS
+
+Per suggestions in the patch set, the code was broken out into explicit
+x86 and ARM souce modules.  It's a fairly simple split but should lend
+itself to early ARM work.
+
+---------------------------------------------------------------------------
+FLUSH ON PANIC
+
+The original code was done only for x86 and patched the panic() routine
+directly.  The patch was made just before the invocation of
+the panic notifier chain, with no indication as to why that provided
+mechanism was not chosen.  flushtm makes use of this chain mechanism.
+I believe this notifier chain exists in the ARM source.
+
+---------------------------------------------------------------------------
+FLUSH ON NMI
+
+NMI is x86-only; a new approach will be needed for ARM and I hope the
+source provides the same opportunities.
+
+The NMI handler chain is grown via register_nmi_handler(), a macro that 
+eventually calls __register_nmi_handler(); this real routine is 
+EXPORT_SYMBOL_GPL.  flushtm adds a new handler at the head of the chain
+which does the cache flush.  flushtm_NMI is easily removed at rmmod_time().
+
+---------------------------------------------------------------------------
+FLUSH ON CPU STOP
+
+CPU stoppage occurs mostly in the context of halting (perhaps for hot-remove)
+and rebooting.  The original code was done only for x86 and directly patched
+the routine stop_this_cpu().  This is one of the final operations in several
+call chains.
+
+A programmed reboot is the simplest approach.  The kernel source for both
+x86 and ARM has the register_reboot_notifier() call.  I assume it works :-)
+
+On x86, just in case, at a lower level: REBOOT is an IPI (Inter Processor 
+Interrupt) crafted and sent to "all other" processors.  If that fails, an
+NMI IPI is tried.  The handlers for each of these interrupts calls 
+stop_this_cpu().  The routine that crafts the IPIs, native_stop_other_cpus(),
+is invoked through a table of function pointers, struct smp_ops smp_ops.  
+This table is EXPORT_SYMBOL_GPL and a candidate for modification.  
+
+In higher-level languages this would be a "decorator": flushtm hijacks that
+entry at insmod time.  On invocation the new routine does a flush first and
+then calls the (saved) original routine.   It can be restored at rmmod time.
+Yes, if the above mechanism falls through to the NMI IPI, the flushing
+may occur twice.  Oh well.
+
+What about truly halting the last remaining CPU?  As near as I can tell,
+that path on SMP systems is only called at the tail end, when other 
+CPUs have been stopped.  Thus the flushing for "this" CPU can be done
+in the native_stop_other_cpus decorator routine.
+
+---------------------------------------------------------------------------
+FLUSH ON PROCESS EXIT
+
+The original project patched the exit() code directly, inserting a VMA page
+walker that cleared NVM pages.  The walker relied on a hypothetical
+"is_pte_NVM()" Boolean function for each page.  This direct approach is a
+lot of overhead.  The current approach to NVM management (the Librarian 
+File System) should expose necessary information in the VMA and opportunities
+to hook the close of the NVM shelf.  For now I may expose that walk/flush
+as a utility routine.
+
+My question is: doesn't the system do this anyhow?  Here's the chain I see:
+
+do_exit() -> exit_mm() -> mmput() -> mm/mmap.c::exit_mmap() 
+exit_mmap() calls	mmu_notifier_release() (love notifiers!)
+	    then	arch_exit_mmap()
+	    then	flush_cache_mm()	!!!!!!!!
+	    finally	unmap_vmas()		the hook point I mentioned
+
+On ARM, there is a routine behind flush_cache_mm().  On x86 it's a noop
+in include/asm-generic/cacheflush.h because cache is mapped to physical 
+memory.  That sounds like good news, except that aperture management
+essentially changes physical memory.  So, for x86, the work is needed.
+
+MMU notifiers are dependent upon CONFIG_MMU_NOTIFIER, which L4TM x86 uses.
+There are two registrant routines, mmu_notifier_register and
+__mmu_notifier_register.  When the Librarian File System (LFS) sets up
+an aperture for a process, it can call mm_notifier_register() and use
+the flushtm_mmu_notifier_ops EXPORTed by flushtm.
+
+---------------------------------------------------------------------------
+FLUSH ON APERTURE CHANGES
+
+The intent of flushtm is to be the repository of all routines that handle
+flushing, providing support for other kernel modules.  The 
+mmu_register_notifier() technique discussed above is my opening suggestion
+and will evolve with the Aperture Manager.
+
+---------------------------------------------------------------------------
+USE OF NON-EXPORTED KERNEL SYMBOLS
+
+Currently this is not being used; the simpler "Makefile" is the default.
+
+A mechanism exists to linking unexported symbols that may not be EXPORTed
+by existing kernel source.  Symbols are entered as EXTERN in the file
+"Makefile.extern".  At build time make will search /proc/kallsysms
+for EXTERN and create a linker script resolved.lds.  That script is 
+linked against the normally-built flushtm.ko to resolve the EXTERNs.
