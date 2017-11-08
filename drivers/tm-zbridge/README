@@ -1,0 +1,404 @@
+
+This is the kernel module for the zbridge for use in The Machine.
+
+Author: Justin Vreeland <justin.mcd.vreeland@hpe.com>
+
+If you're reading this on github please navigate to the file itself. github does
+not properly render plaintext/monospace READMEs.
+
+================================================================================
+
+=========
+Overview:
+=========
+
+This module provides sysfs, ioctl and netlink interfaces for modifying the
+various registers in the zbridge. Some of the functionality will be removed
+and relocated as development continues.
+
+===================
+Usage and User API:
+===================
+
+For various reason it may be best to checkout the Limitations section for each
+interface under 'Dev Details and Rational'.
+
+sysfs:
+======
+
+As of this writing (hopefully this gets updated relatively frequently) sysfs
+for this module is mounted at /sys/kernel/dtable
+
+Under it there are four attributes (files)  book_table,  booklet_table,
+book_table_cursor and booklet_table_cursor.
+
+You interact with these by reading or writing to and from the file.
+
+Reading from booklet_table will return the offset and value of the descriptor
+to which the cursor was most recently set.
+
+You can change the position of the cursor 1 of two ways.
+
+1) Write 'set <offset>' into the booklet_table file
+
+Or
+
+2) Write '<offset>' into the booklet_table_cursor file. Reading from this file
+   will also get you the current cursor setting.
+
+There are two methods because I'm not really sure what the proper way to use
+sysfs and whether or not have strings in general or using them to execute
+multiple 'commands' out of a single sysfs attribute is really in-line with the
+recommended usage of sysfs. I imagine the more proper way to do it is with
+the cursor file.
+
+The commands used for the book_table file are 'set' and 'put'. Set meaning
+to set the cursor put meaning to put the value at a particular offset
+example:
+
+echo 'put 0x1 0xFFF' > /sys/kernel/dtable/book_table
+
+will put the value 0xFFF into the register at position 1.
+
+cat /syste/kernel/dtable/book_table
+
+will return the value offset value pairs at the *position of the cursor*
+note that writing into a file with 'put' will not change the cursor position.
+
+ioctl:
+======
+
+Ensure you include dtable.h or absolutely none of this will work.
+
+As of this writing the ioctl device is located at /dev/dtableioctl there's a
+file in the test directory ioctl_test. That will demonstrate basic ioctl usage
+The ioctl commands available are:
+
+DESC_READ_BK_OFF
+DESC_READ_BKLT_OFF
+DESC_BK_PUT
+DESC_BKLT_PUT
+
+The DESC_READ_*_OFF reads the value at offset given and place the value into
+the value field of the structure.
+
+The DESC_*_PUT puts the value at offset given and return the same structure.
+
+All ioctl functions use the dtable_ioctl_rep structure which contains a structure
+that looks exactly like this:
+
+struct dtable_ioctl_rep {
+	uint64_t offset;
+	union {
+		uint64_t value;
+		// these bitfields need to be verified
+		// and might be screwy on different architectures? I'm not sure
+		// right now
+		struct bits {
+			uint64_t valid : 1;
+			uint64_t reserved1 : 15;		// 16
+			// union of LZA does that matter?
+			uint64_t booklet : 17;			// 33
+			uint64_t book : 13;			// 46
+			uint64_t interleave_group : 7;		// 53
+			uint64_t reserved2 : 11;		// 64
+		} bits;
+	};
+};
+
+
+You'll notice above there's a line that says '// union of LZA does that matter?'
+the answer is yes it does matter, it'd be nice to be able to include a union
+that represents the whole LZA group but no it can't be added. To use bitfields,
+especially inside unions you need to be able to ensure the size of the total
+structure. For example if I want to make a bitfied that only uses seven bits
+it will still take up the same size as whatever it was defined as. uint64_t in
+the case above. Since the LZA is not a nice power of two (I belive it's 37)
+that last bit cannot be properly shoehorned into the bit field.  In addition
+even if I create a magical structure of the correct kind bitfields are
+implementation and architecture defined causing even more alignment issues
+which is why the test program compares bitfields and masks to check that they
+agree.
+
+Summary: If you can't fully pack your bitfield with the correct types your
+complier will do it for you in whatever way it chooses to my knowledge the
+standards give no guidance.
+
+=========================
+Dev Details and Rational:
+=========================
+
+sysfs:
+======
+
+Location:
+
+Currently sysfs is mounted at /sys/kernel/dtable the only reason is that I knew
+how to do this quickly using the miscdevice <linux/miscdevice.h>.
+
+After some investigation it'll be determined what the hierarchy will be in the
+interim. Currently the hierarchy looks to be heading towards device/zbridge
+
+/sys/device/zbridge/dtable
+             |
+             +-----fwtable
+             |
+             +-----etc....
+
+but who knows, things change.
+
+This module needs to have full functionality through all interfaces. Currently
+there's a read and write attribute for both book and booklet table. However
+there has to be some way to change the value that's going to be read out of the
+file. So something must be done to determine how that information should be
+conveyed.
+
+The initial thought was to use a file per descriptor and then reading  and
+writing would always act on the corresponding register. An example can be seen
+below.
+
+/sys/kernel/dtable/book/0
+                    |
+                    +---1
+                    |
+                    .
+                    .
+                    .
+                    |
+                    +---2047
+
+It turns out to be a moderate amount of work to create that number of attributes
+or at least the method couldn't easily have been found.  Furthermore the assumption
+with the above method is that multiple different processes might need to access
+multiple different registers at the same time.  This turns out to be a mistaken
+assumption.
+
+Another suggested method is to use one file and change what is written to it.
+The module will keep a cursor with the index of the register that it has been
+set to read from, you can write to a register without changing which will be
+next read from.
+
+Have a string in the beginning that indicates the action to be performed and
+do that action in order it takes away the pain of both constructing and
+parsing string and leaves us open for easily addable actions like the
+format of the result that should be read.
+
+Limitations:
+============
+
+  sysfs cannot output all the register at one time.  sysfs passes buffers of
+  size PAGE_SIZE (Check lxr) on x86 this is 4k and on ARM64 it's 64k. There
+  are 2k registers of 64 bits a piece. There's no way to output every register
+  and making partial write on a first read and then writing out the rest on the
+  second doesn't seem a particularly good way to do things either so if all
+  the registers are desired it'd be easier to iterate through them.
+
+  #! /bin/bash
+  for i in {0..2047}; do echo 'set $i' > /sys/kernel/dtable/book_table; cat /sys/kernel/dtable/book_table; done
+
+  Or some equivalent method.
+
+
+
+
+ioctl:
+======
+
+  The ioctl interface uses the same ioctl interface that every other ioctl
+  interface uses.  That being said the module provides two types of functions.
+  A function for setting a value and a function for retrieving a value.
+
+  Be sure to read the users section above for some more details.
+
+Limitations:
+============
+
+  ioctl will not change the cursor that sysfs is using.
+
+netlink:
+========
+
+  Like the other two interfaces there's an example file to show how to use
+  netlink that also tests netlink to make sure it's behaving as expected.
+
+  Netlink uses four commands:
+
+  DESC_C_READ_BOOK
+  DESC_C_READ_BOOKLET
+  DESC_C_WRITE_BOOK
+  DESC_C_WRITE_BOOKLET
+
+  both of these take two uint64s and will return two uint64s.
+
+Limitations:
+============
+
+  The interface for libnl is a bit confusing, the documentation is out of date
+  and the behavior can be annoying at times.  Be careful when using the test code
+  as a reference and make sure you understand why a particular line was added as
+  some, specifically removing the ack requests is not appropriate for all
+  circumstances.
+
+
+Testing:
+========
+
+  sysfs:
+  ======
+    python sysfs_test.py
+    if you receive output something broke
+    make sure it's python3
+
+  ioctl:
+  ======
+    make clean && make
+    ./ioctl_test
+    if you receive output something is broken
+
+  netlink:
+  ========
+    make clean && make
+    ./netlink_test
+
+    Requires pkg-config & libnl to work properly.
+    if you receive output something is broken
+
+Debian packaging using DKMS:
+============================
+
+1. Pick a system on which to build the debian package, an x86 system running
+L4TM works fine.
+2. Install "debhelper" and "dkms" packages on system.
+
+    $ apt-get install debhelper dkms
+
+3. Clone the "zbridge_driver" repository in the /usr/src directory.
+
+    $ cd /usr/src
+    $ git clone https://github.hpe.com/hpelinux/zbridge_driver.git
+
+4. Move the directory to the new version name. The version format for
+l4tm is <package>-<upstream_version>-<packaging version>+l4tm<version>
+    $ mv zbridge_driver tm-zbridge-0.4-1+l4tm1 
+    $ cd tm-zbridge-0.4-1+l4tm1
+    $ rm -rf .git*
+
+5. Update the version number in dkms.conf file:
+    $ vi dkms.conf
+	change the PACKAGE_VERSION="<version" to the new version.
+
+6. Update the changelog for this version.
+    $ dch -v <version>
+
+7. Add the "tm-zbridge" driver to DKMS database.
+
+    $ cd /usr/src/tm-zbridge-0.4-1+l4tm1
+    $ dkms add -m tm-zbridge -v 0.4-1+l4tm1
+
+8. Build the Debian .dsc source-only package.
+
+    $ dkms mkdsc -m tm-zbridge -v 0.4-1+l4tm1 --source-only
+
+9. Build the Debian .deb source-only package.
+
+    $ dkms mkdeb -m tm-zbridge -v 0.4-1+l4tm1 --source-only
+
+10. Find the built packages in:
+# ls /var/lib/dkms/tm-zbridge/0.4-1+l4tm1/dsc
+tm-zbridge-dkms_0.4-1+l4tm1.dsc		 tm-zbridge-dkms_0.4-1+l4tm1.tar.gz
+tm-zbridge-dkms_0.4-1+l4tm1_source.changes
+
+# ls /var/lib/dkms/tm-zbridge/0.4-1+l4tm1/deb
+tm-zbridge-dkms_0.4-1+l4tm1_all.deb
+
+11. Unpack the deb and move the changelog and copyright.
+# cd /var/lib/dkms/tm-zbridge/0.4-1+l4tm1/
+# cp deb/*deb dsc
+# cd dsc
+# mkdir package
+# dpkg-deb -R *.deb package
+# cd package/usr/share
+# mkdir doc
+# cd doc
+# mkdir tm-zbridge-dkms
+# cd tm-zbridge-dkms
+# cp /usr/src/tm-z*0.7*/debian/changelog changelog.Debian
+# cp /usr/src/tm-z*0.7*/debian/copyright .
+# gzip -9 changelog.Debian
+# md5sum *
+# cd ../../../../DEBIAN
+# vi md5sums
+add first two lines for new files using the correct md5sum:
+c877830d60351358318381dde6292ae6  usr/share/doc/tm-zbridge-dkms/changelog.Debian.gz
+7df0cc92a7dc80d2aab9e26c116fd47b  usr/share/doc/tm-zbridge-dkms/copyright
+# cd ../..
+# dpkg-deb -b package tm-zbridge-dkms_0.7-1+l4tm1_all.deb
+# ls -l *.deb
+# sha1sum *.deb
+# sha256sum *.deb
+# md5sum *.deb
+edit the *.changes file and add a new line for the .deb file in all three
+sections. Make sure to update the file size from the ls -l and use the
+same convention as the other files in the last md4sum section.
+
+12. Copy the .dsc, tar.gz, source.changes, and .deb file to
+hlinux-build.us.rdlabs.hpecorp.net in a temporary directory. Run
+   $ dput -o l4tm *source.changes
+to test the package acceptance tests. Fix any problems now.
+
+Installing and testing the Debian package on a test system:
+=========================================================
+
+1. Install the DKMS package and kernel header files.
+
+    $ apt-get install dkms linux-headers-$(uname -r)
+
+2. Copy the .deb file to the test system and install it, this will install the
+   files, add them to the DKMS database, build the module and place the module
+   in the kernel modules directory.
+
+    $ dpkg -i tm-zbridge-dkms_0.4-1+l4tm1.deb
+
+3. List the installed Debian package and list the DKMS status.
+
+    $ dpkg -l tm-zbridge-dkms
+    $ dkms status
+
+4. Load the "zbridge" module.
+
+    $ modprobe zbridge
+
+5. Remove the Debian package and DKMS files.
+
+    $ modprobe -r zbridge
+    $ dpkg -r zbridge-dkms
+
+6. Test on both x86 and arm platforms.
+
+Submit the new package and commit changes to git
+=================================================
+
+1. Go back to your original system where you built the packages.
+
+2. Copy dkms.conf and debian/changelog to a git branch and check in the
+changes.
+
+3. Mark this spot in the git tree with:
+  $ git checkout master
+  $ git tag -a v0.4-1+l4tm1
+  $ git push --follow-tags
+
+This is important because the debian/watch file uses this tag formate to
+find the version number of the "upstream" code. Since this is native
+HPE code, we use this convention to get a reliable version.
+
+4. Copy the tested package files to the system you can run dput from.
+  $ scp /var/lib/dkms/tm-zbridge/0.4-1+l4tm1/dsc/* edall@hlinux-build.us.rdlabs.hpecorp.net:/home/edall/test
+  $ scp /var/lib/dkms/tm-zbridge/0.4-1+l4tm1/deb/* edall@hlinux-build.us.rdlabs.hpecorp.net:/home/edall/test
+
+5. Log on to the system you can run dput from
+  $ ssh edall@hlinux-build.us.rdlabs.hpecorp.net
+
+6. Submit the new packages to the repo with dput.
+  $ cd test
+  $ dput l4tm tm-zbridge-dkms_0.4-1+l4tm1_source.changes

@@ -1,0 +1,5 @@
+config ZBRIDGE
+  tristate "ZBRIDGE - The zbridge driver"
+  default m
+  help
+    Needed by The Machine to interact with the memory fabric

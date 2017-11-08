@@ -1,0 +1,15 @@
+#!/bin/sh
+module="zbridge"
+device="zbcommit"
+
+/sbin/rmmod fam_atomic_driver
+umount /sys/fs/tmfs/connections
+/sbin/rmmod tmfs
+
+# invoke rmmod with all arguments we got
+/sbin/rmmod $module $* || exit 1
+
+# Remove stale nodes
+rm -f /dev/${device}
+
+
