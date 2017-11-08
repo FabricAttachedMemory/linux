@@ -1,5 +1,5 @@
-config FAM_ATOMIC_DRIVER
-	tristate "FAM_ATOMIC_DRIVER - The Machine FAM atomic support"
+config FAM_ATOMIC
+	tristate "FAM_ATOMIC - The Machine FAM atomic support"
 	depends on TMFS
 	default m
 	help

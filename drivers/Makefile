@@ -182,3 +182,8 @@ obj-$(CONFIG_FPGA)		+= fpga/
 obj-$(CONFIG_FSI)		+= fsi/
 obj-$(CONFIG_TEE)		+= tee/
 obj-$(CONFIG_MULTIPLEXER)	+= mux/
+
+obj-$(CONFIG_FLUSHTM)		+= tm-flush/
+obj-$(CONFIG_ZBRIDGE)		+= tm-zbridge/
+obj-$(CONFIG_TMFS)		+= tm-fuse/
+obj-$(CONFIG_FAM_ATOMIC)	+= tm-fam-atomic/

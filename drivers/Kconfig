@@ -210,3 +210,10 @@ source "drivers/tee/Kconfig"
 source "drivers/mux/Kconfig"
 
 endmenu
+
+menu "The Machine Librarian File System and Atomics Support"
+source "drivers/tm-zbridge/Kconfig"
+source "drivers/tm-flush/Kconfig"
+source "drivers/tm-fuse/Kconfig"
+source "drivers/tm-fam-atomic/Kconfig"
+endmenu

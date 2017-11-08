@@ -1,6 +1,6 @@
 # Makefile for fam-atomic-driver
 
-CONFIG_FAM_ATOMIC_DRIVER ?= m
+CONFIG_FAM_ATOMIC ?= m
 
 KERNELBASE = /lib/modules/$(shell uname -r)
 KERNELDIR ?= $(KERNELBASE)/build
@@ -13,7 +13,7 @@ DESC_SYMBOLS+=/root/l4tm/tm-fuse-4.5.2/Module.symvers
 DESC_SYMBOLS+=$(PWD)/../tm-fuse-4.3.3/Module.symvers
 DESC_SYMBOLS+=/root/l4tm/tm-fuse-4.3.3/Module.symvers
 
-obj-$(CONFIG_FAM_ATOMIC_DRIVER) += fam-atomic-driver.o
+obj-$(CONFIG_FAM_ATOMIC) += fam-atomic-driver.o
 
 
 all:
