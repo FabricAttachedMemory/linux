@@ -14,9 +14,16 @@ PWD = $(shell /bin/pwd)
 
 ifdef CONFIG_TMFS
   # Compile as part of linux kernel
-  EXTRA_CFLAGS=-DUSE_ZBRIDGE_APIS
-  EXTRA_CFLAGS+=-DUSE_FLUSHTM_APIS
-  DESC_SYMBOLS=
+  ifdef CONFIG_TM_MFT
+    $(info Compiling tmfs with zbridge and flushtm support)
+    EXTRA_CFLAGS=-DUSE_ZBRIDGE_APIS
+    EXTRA_CFLAGS+=-DUSE_FLUSHTM_APIS
+    DESC_SYMBOLS=
+  else
+    $(info Compiling tmfs without zbridge and flushtm support)
+    EXTRA_CFLAGS=
+    DESC_SYMBOLS=
+  endif
 else
   # Compile outside of the linux kernel source (default)
   ifneq ($(zbridge), 1)

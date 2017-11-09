@@ -4,3 +4,10 @@ config TMFS
 	default m
 	help
 	  In order to run the Librarian File System (LFS) client answer Y or M.
+
+config TM_MFT
+	bool "TM_MFT - The Machine Librarian File System support"
+	depends on TMFS
+	default y
+	help
+	  Compile tmfs driver with zbridge and flushtm support answer Y or N.
