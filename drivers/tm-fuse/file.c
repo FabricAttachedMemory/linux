@@ -464,7 +464,7 @@ int tmfs_fsync_common(struct file *file, loff_t start, loff_t end,
 	 * wait for all outstanding writes, before sending the FSYNC
 	 * request.
 	 */
-	err = filemap_write_and_wait_range(inode->i_mapping, start, end);
+	err = file_write_and_wait_range(file, start, end);
 	if (err)
 		goto out;
 
@@ -472,10 +472,10 @@ int tmfs_fsync_common(struct file *file, loff_t start, loff_t end,
 
 	/*
 	 * Due to implementation of tmfs writeback
-	 * filemap_write_and_wait_range() does not catch errors.
+	 * file_write_and_wait_range() does not catch errors.
 	 * We have to do this directly after tmfs_sync_writes()
 	 */
-	err = filemap_check_errors(file->f_mapping);
+	err = file_check_and_advance_wb_err(file);
 	if (err)
 		goto out;
 
@@ -652,7 +652,7 @@ static size_t tmfs_async_req_send(struct tmfs_conn *fc, struct tmfs_req *req,
 static size_t tmfs_send_read(struct tmfs_req *req, struct tmfs_io_priv *io,
 			     loff_t pos, size_t count, fl_owner_t owner)
 {
-	struct file *file = io->file;
+	struct file *file = io->iocb->ki_filp;
 	struct tmfs_file *ff = file->private_data;
 	struct tmfs_conn *fc = ff->fc;
 
@@ -714,7 +714,8 @@ static void tmfs_short_read(struct tmfs_req *req, struct inode *inode,
 
 static int tmfs_do_readpage(struct file *file, struct page *page)
 {
-	struct tmfs_io_priv io = TMFS_IO_PRIV_SYNC(file);
+	struct kiocb iocb;
+	struct tmfs_io_priv io;
 	struct inode *inode = page->mapping->host;
 	struct tmfs_conn *fc = get_tmfs_conn(inode);
 	struct tmfs_req *req;
@@ -742,6 +743,8 @@ static int tmfs_do_readpage(struct file *file, struct page *page)
 	req->num_pages = 1;
 	req->pages[0] = page;
 	req->page_descs[0].length = count;
+	init_sync_kiocb(&iocb, file);
+	io = (struct tmfs_io_priv) TMFS_IO_PRIV_SYNC(&iocb);
 	num_read = tmfs_send_read(req, &io, pos, count, NULL);
 	err = req->out.h.error;
 
@@ -930,7 +933,7 @@ static ssize_t tmfs_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	if (fc->auto_inval_data ||
 	    (iocb->ki_pos + iov_iter_count(to) > i_size_read(inode))) {
 		int err;
-		err = tmfs_update_attributes(inode, NULL, iocb->ki_filp, NULL);
+		err = tmfs_update_attributes(inode, iocb->ki_filp);
 		if (err)
 			return err;
 	}
@@ -964,13 +967,18 @@ static void tmfs_write_fill(struct tmfs_req *req, struct tmfs_file *ff,
 static size_t tmfs_send_write(struct tmfs_req *req, struct tmfs_io_priv *io,
 			      loff_t pos, size_t count, fl_owner_t owner)
 {
-	struct file *file = io->file;
+	struct kiocb *iocb = io->iocb;
+	struct file *file = iocb->ki_filp;
 	struct tmfs_file *ff = file->private_data;
 	struct tmfs_conn *fc = ff->fc;
 	struct tmfs_write_in *inarg = &req->misc.write.in;
 
 	tmfs_write_fill(req, ff, pos, count);
 	inarg->flags = file->f_flags;
+	if (iocb->ki_flags & IOCB_DSYNC)
+		inarg->flags |= O_DSYNC;
+	if (iocb->ki_flags & IOCB_SYNC)
+		inarg->flags |= O_SYNC;
 	if (owner != NULL) {
 		inarg->write_flags |= TMFS_WRITE_LOCKOWNER;
 		inarg->lock_owner = tmfs_lock_owner_id(fc, owner);
@@ -1000,14 +1008,14 @@ bool tmfs_write_update_size(struct inode *inode, loff_t pos)
 	return ret;
 }
 
-static size_t tmfs_send_write_pages(struct tmfs_req *req, struct file *file,
+static size_t tmfs_send_write_pages(struct tmfs_req *req, struct kiocb *iocb,
 				    struct inode *inode, loff_t pos,
 				    size_t count)
 {
 	size_t res;
 	unsigned offset;
 	unsigned i;
-	struct tmfs_io_priv io = TMFS_IO_PRIV_SYNC(file);
+	struct tmfs_io_priv io = TMFS_IO_PRIV_SYNC(iocb);
 
 	for (i = 0; i < req->num_pages; i++)
 		tmfs_wait_on_page_writeback(inode, req->pages[i]->index);
@@ -1108,7 +1116,7 @@ static inline unsigned tmfs_wr_pages(loff_t pos, size_t len)
 }
 
 /* LFS - removed static */
-ssize_t tmfs_perform_write(struct file *file,
+ssize_t tmfs_perform_write(struct kiocb *iocb,
 				  struct address_space *mapping,
 				  struct iov_iter *ii, loff_t pos)
 {
@@ -1141,7 +1149,7 @@ ssize_t tmfs_perform_write(struct file *file,
 		} else {
 			size_t num_written;
 
-			num_written = tmfs_send_write_pages(req, file, inode,
+			num_written = tmfs_send_write_pages(req, iocb, inode,
 							    pos, count);
 			err = req->out.h.error;
 			if (!err) {
@@ -1177,7 +1185,7 @@ static ssize_t tmfs_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 
 	if (get_tmfs_conn(inode)->writeback_cache) {
 		/* Update size (EOF optimization) and mode (SUID clearing) */
-		err = tmfs_update_attributes(mapping->host, NULL, file, NULL);
+		err = tmfs_update_attributes(mapping->host, file);
 		if (err)
 			return err;
 
@@ -1209,7 +1217,7 @@ static ssize_t tmfs_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 
 		pos += written;
 
-		written_buffered = tmfs_perform_write(file, mapping, from, pos);
+		written_buffered = tmfs_perform_write(iocb, mapping, from, pos);
 		if (written_buffered < 0) {
 			err = written_buffered;
 			goto out;
@@ -1228,13 +1236,15 @@ static ssize_t tmfs_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 		written += written_buffered;
 		iocb->ki_pos = pos + written_buffered;
 	} else {
-		written = tmfs_perform_write(file, mapping, from, iocb->ki_pos);
+		written = tmfs_perform_write(iocb, mapping, from, iocb->ki_pos);
 		if (written >= 0)
 			iocb->ki_pos += written;
 	}
 out:
 	current->backing_dev_info = NULL;
 	inode_unlock(inode);
+	if (written > 0)
+		written = generic_write_sync(iocb, written);
 
 	return written ? written : err;
 }
@@ -1325,7 +1335,7 @@ ssize_t tmfs_direct_io(struct tmfs_io_priv *io, struct iov_iter *iter,
 {
 	int write = flags & TMFS_DIO_WRITE;
 	int tmcd = flags & TMFS_DIO_TMCD;
-	struct file *file = io->file;
+	struct file *file = io->iocb->ki_filp;
 	struct inode *inode = file->f_mapping->host;
 	struct tmfs_file *ff = file->private_data;
 	struct tmfs_conn *fc = ff->fc;
@@ -1407,8 +1417,7 @@ static ssize_t __tmfs_direct_read(struct tmfs_io_priv *io,
 				  loff_t *ppos)
 {
 	ssize_t res;
-	struct file *file = io->file;
-	struct inode *inode = file_inode(file);
+	struct inode *inode = file_inode(io->iocb->ki_filp);
 
 	if (is_bad_inode(inode))
 		return -EIO;
@@ -1422,15 +1431,14 @@ static ssize_t __tmfs_direct_read(struct tmfs_io_priv *io,
 
 static ssize_t tmfs_direct_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
-	struct tmfs_io_priv io = TMFS_IO_PRIV_SYNC(iocb->ki_filp);
+	struct tmfs_io_priv io = TMFS_IO_PRIV_SYNC(iocb);
 	return __tmfs_direct_read(&io, to, &iocb->ki_pos);
 }
 
 static ssize_t tmfs_direct_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
-	struct file *file = iocb->ki_filp;
-	struct inode *inode = file_inode(file);
-	struct tmfs_io_priv io = TMFS_IO_PRIV_SYNC(file);
+	struct inode *inode = file_inode(iocb->ki_filp);
+	struct tmfs_io_priv io = TMFS_IO_PRIV_SYNC(iocb);
 	ssize_t res;
 
 	if (is_bad_inode(inode))
@@ -2069,7 +2077,8 @@ const struct vm_operations_struct tmfs_file_vm_ops = {
 	.close		= lfs_vma_close,  //LFS: was tmfs_vma_close
 	.fault		= lfs_filemap_fault,  //LFS: was filemap_fault
 	.map_pages	= filemap_map_pages,
-	.pfn_mkwrite    = NULL,  // LFS FIXME do we need a pte_mkwrite() routine?
+	.pfn_mkwrite	= NULL,  // LFS FIXME do we need a pte_mkwrite() routine?
+	.page_mkwrite	= tmfs_page_mkwrite,
 };
 
 static int tmfs_file_mmap(struct file *file, struct vm_area_struct *vma)
@@ -2111,11 +2120,11 @@ static int convert_tmfs_file_lock(struct tmfs_conn *fc,
 		fl->fl_end = ffl->end;
 
 		/*
-		 * Convert pid into the caller's pid namespace. If the pid
-		 * does not map into the namespace fl_pid will get set to 0.
+		 * Convert pid into init's pid namespace.  The locks API will
+		 * translate it into the caller's pid namespace.
 		 */
 		rcu_read_lock();
-		fl->fl_pid = pid_vnr(find_pid_ns(ffl->pid, fc->pid_ns));
+		fl->fl_pid = pid_nr_ns(find_pid_ns(ffl->pid, fc->pid_ns), &init_pid_ns);
 		rcu_read_unlock();
 		break;
 
@@ -2189,9 +2198,6 @@ static int tmfs_setlk(struct file *file, struct file_lock *fl, int flock)
 	/* Unlock on close is handled by the flush method */
 	if ((fl->fl_flags & FL_CLOSE_POSIX) == FL_CLOSE_POSIX)
 		return 0;
-
-	if (pid && pid_nr == 0)
-		return -EOVERFLOW;
 
 	tmfs_lk_fill(&args, file, fl, opcode, pid_nr, flock, &inarg);
 	err = tmfs_simple_request(fc, &args);
@@ -2312,7 +2318,7 @@ static loff_t tmfs_lseek(struct file *file, loff_t offset, int whence)
 	return vfs_setpos(file, outarg.offset, inode->i_sb->s_maxbytes);
 
 fallback:
-	err = tmfs_update_attributes(inode, NULL, file, NULL);
+	err = tmfs_update_attributes(inode, file);
 	if (!err)
 		return generic_file_llseek(file, offset, whence);
 	else
@@ -2332,7 +2338,7 @@ static loff_t tmfs_file_llseek(struct file *file, loff_t offset, int whence)
 		break;
 	case SEEK_END:
 		inode_lock(inode);
-		retval = tmfs_update_attributes(inode, NULL, file, NULL);
+		retval = tmfs_update_attributes(inode, file);
 		if (!retval)
 			retval = generic_file_llseek(file, offset, whence);
 		inode_unlock(inode);
@@ -2884,7 +2890,6 @@ tmfs_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 	io->offset = offset;
 	io->write = (iov_iter_rw(iter) == WRITE);
 	io->err = 0;
-	io->file = file;
 	/*
 	 * By default, we want to optimize all I/Os with async request
 	 * submission to the client filesystem if supported.

@@ -938,31 +938,27 @@ static int tmfs_do_getattr(struct inode *inode, struct kstat *stat,
 	return err;
 }
 
-int tmfs_update_attributes(struct inode *inode, struct kstat *stat,
-			   struct file *file, bool *refreshed)
+static int tmfs_update_get_attr(struct inode *inode, struct file *file,
+				struct kstat *stat)
 {
 	struct tmfs_inode *fi = get_tmfs_inode(inode);
-	int err;
-	bool r;
+	int err = 0;
 
 	if (time_before64(fi->i_time, get_jiffies_64())) {
-		r = true;
 		forget_all_cached_acls(inode);
 		err = tmfs_do_getattr(inode, stat, file);
-	} else {
-		r = false;
-		err = 0;
-		if (stat) {
-			generic_fillattr(inode, stat);
-			stat->mode = fi->orig_i_mode;
-			stat->ino = fi->orig_ino;
-		}
+	} else if (stat) {
+		generic_fillattr(inode, stat);
+		stat->mode = fi->orig_i_mode;
+		stat->ino = fi->orig_ino;
 	}
 
-	if (refreshed != NULL)
-		*refreshed = r;
-
 	return err;
+}
+
+int tmfs_update_attributes(struct inode *inode, struct file *file)
+{
+	return tmfs_update_get_attr(inode, file, NULL);
 }
 
 int tmfs_reverse_inval_entry(struct super_block *sb, u64 parent_nodeid,
@@ -1808,7 +1804,7 @@ static int tmfs_getattr(const struct path *path, struct kstat *stat,
 	if (!tmfs_allow_current_process(fc))
 		return -EACCES;
 
-	return tmfs_update_attributes(inode, stat, NULL, NULL);
+	return tmfs_update_get_attr(inode, NULL, stat);
 }
 
 static const struct inode_operations tmfs_dir_inode_operations = {

@@ -90,7 +90,7 @@ static struct list_head *tmcd_conntbl_head(dev_t devt)
 
 static ssize_t tmcd_read_iter(struct kiocb *kiocb, struct iov_iter *to)
 {
-	struct tmfs_io_priv io = TMFS_IO_PRIV_SYNC(kiocb->ki_filp);
+	struct tmfs_io_priv io = TMFS_IO_PRIV_SYNC(kiocb);
 	loff_t pos = 0;
 
 	return tmfs_direct_io(&io, to, &pos, TMFS_DIO_TMCD);
@@ -98,7 +98,7 @@ static ssize_t tmcd_read_iter(struct kiocb *kiocb, struct iov_iter *to)
 
 static ssize_t tmcd_write_iter(struct kiocb *kiocb, struct iov_iter *from)
 {
-	struct tmfs_io_priv io = TMFS_IO_PRIV_SYNC(kiocb->ki_filp);
+	struct tmfs_io_priv io = TMFS_IO_PRIV_SYNC(kiocb);
 	loff_t pos = 0;
 	/*
 	 * No locking or generic_write_checks(), the server is

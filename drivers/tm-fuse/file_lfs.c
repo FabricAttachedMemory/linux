@@ -37,7 +37,7 @@ ssize_t lfs_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	if (fc->auto_inval_data ||
 	    (iocb->ki_pos + iov_iter_count(to) > i_size_read(inode))) {
 		int err;
-		err = tmfs_update_attributes(inode, NULL, iocb->ki_filp, NULL);
+		err = tmfs_update_attributes(inode, iocb->ki_filp);
 		if (err)
 			return err;
 	}
@@ -64,7 +64,7 @@ ssize_t lfs_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 
 	if (get_tmfs_conn(inode)->writeback_cache) {
 		/* Update size (EOF optimization) and mode (SUID clearing) */
-		err = tmfs_update_attributes(mapping->host, NULL, file, NULL);
+		err = tmfs_update_attributes(mapping->host, file);
 		if (err)
 			return err;
 
@@ -113,7 +113,7 @@ ssize_t lfs_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 
 		pos += written;
 
-		written_buffered = tmfs_perform_write(file, mapping, from, pos);
+		written_buffered = tmfs_perform_write(iocb, mapping, from, pos);
 		if (written_buffered < 0) {
 			err = written_buffered;
 			goto out;
@@ -132,7 +132,7 @@ ssize_t lfs_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 		written += written_buffered;
 		iocb->ki_pos = pos + written_buffered;
 	} else {
-		written = tmfs_perform_write(file, mapping, from, iocb->ki_pos);
+		written = tmfs_perform_write(iocb, mapping, from, iocb->ki_pos);
 		if (written >= 0)
 			iocb->ki_pos += written;
 	}

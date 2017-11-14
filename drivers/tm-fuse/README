@@ -1,5 +1,5 @@
 ---------------------------------------------------------------------------
-Steps to port the 4.5.2 kernel version of fuse to tm-fuse
+Steps to port the 4.14.y kernel version of fuse to tm-fuse
 ---------------------------------------------------------------------------
 
 + get source files for target kernel (<source>/fs/fuse)
@@ -59,7 +59,7 @@ $ tmcd.c   : #include <linux/tmfs.h> --> #include "tmfs.h"
 + files, then compare with the tm-fuse versions to find LFS related
 + code that needs to be merged in.
 
-+ As of the port to 4.13 the following files had changes
++ As of the port to 4.14 the following files had changes
 + dir.c
 + file.c
 + inode.c

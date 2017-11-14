@@ -77,25 +77,25 @@ struct tmfs_forget_link {
 /* Book data for a given shelf, keyed by book number */
 struct tmfs_book2lza_data {
 
-        /* Book LZA */
-        uint64_t lza;
+	/* Book LZA */
+	uint64_t lza;
 
-        /* Starting physical/aperture address of the book */
-        uint64_t book_phys;
+	/* Starting physical/aperture address of the book */
+	uint64_t book_phys;
 };
 
 /* Global data gets read as soon as an inode exists for spoof_getxattr */
 #define DESCRIPTOR_SLOTS 1906
 
 typedef struct {
-        unsigned long book_size, addr_mode, aper_base;
-        struct list_head desbk_slot2mappers[DESCRIPTOR_SLOTS];
-        unsigned long shadow_igstart[128];      // copy of lfs_shadow::_igstart
+	unsigned long book_size, addr_mode, aper_base;
+	struct list_head desbk_slot2mappers[DESCRIPTOR_SLOTS];
+	unsigned long shadow_igstart[128];      // copy of lfs_shadow::_igstart
 } tmfs_global_t;
 
 /* Radix tree roots for book data caching (struct address_map ->private_data) */
 struct tmfs_book_cache {
-        struct radix_tree_root book2lza_root;
+	struct radix_tree_root book2lza_root;
 };
 
 /* Defined in file_lfs.c; alternate APIs for tables defined in file.c */
@@ -126,7 +126,7 @@ int spoof_getxattr(struct inode *inode, char *req, void *resp, size_t size);
    by table replacement APIs
 */
 void tmfs_link_write_file(struct file *);
-ssize_t tmfs_perform_write(struct file *, struct address_space *, struct iov_iter *, loff_t);
+ssize_t tmfs_perform_write(struct kiocb *, struct address_space *, struct iov_iter *, loff_t);
 void tmfs_do_truncate(struct file *);
 
 /* This table is referenced in lfs.c, but same "direction" of reference */
@@ -335,16 +335,15 @@ struct tmfs_io_priv {
 	bool should_dirty;
 	int err;
 	struct kiocb *iocb;
-	struct file *file;
 	struct completion *done;
 	bool blocking;
 };
 
-#define TMFS_IO_PRIV_SYNC(f) \
+#define TMFS_IO_PRIV_SYNC(i) \
 {					\
 	.refcnt = KREF_INIT(1),		\
 	.async = 0,			\
-	.file = f,			\
+	.iocb = i,			\
 }
 
 /**
@@ -988,8 +987,7 @@ u64 tmfs_lock_owner_id(struct tmfs_conn *fc, fl_owner_t id);
 
 void tmfs_update_ctime(struct inode *inode);
 
-int tmfs_update_attributes(struct inode *inode, struct kstat *stat,
-			   struct file *file, bool *refreshed);
+int tmfs_update_attributes(struct inode *inode, struct file *file);
 
 void tmfs_flush_writepages(struct inode *inode);
 

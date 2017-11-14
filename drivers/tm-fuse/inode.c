@@ -1348,6 +1348,9 @@ static int __init tmfs_init(void)
 {
 	int res;
 
+	printk(KERN_INFO "tmfs init (API version %i.%i)\n",
+	       TMFS_KERNEL_VERSION, TMFS_KERNEL_MINOR_VERSION);
+
 	INIT_LIST_HEAD(&tmfs_conn_list);
 	res = tmfs_fs_init();
 	if (res)
