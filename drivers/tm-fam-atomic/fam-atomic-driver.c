@@ -111,8 +111,8 @@ static int fam_atomic_release(struct inode *inode, struct file *file)
 static inline unsigned long va_to_pa(unsigned long virt_addr)
 {
 	unsigned long phys_addr, offset, pfn, address;
-	struct mm_struct *mm = current->mm;
 	pgd_t *pgd;
+	p4d_t *p4d;
 	pud_t *pud;
 	pmd_t *pmd;
 	pte_t *ptep;
@@ -121,11 +121,15 @@ static inline unsigned long va_to_pa(unsigned long virt_addr)
 	offset = virt_addr % PAGE_SIZE;
 	address = virt_addr - offset;
 
-	pgd = pgd_offset(mm, address);
+	pgd = pgd_offset_k(address);
 	if (pgd_none(*pgd))
 		return -1;
 
-	pud = pud_offset(pgd, address);
+	p4d = p4d_offset(pgd, address);
+	if (p4d_none(*p4d))
+		return -1;
+
+	pud = pud_offset(p4d, address);
 	if (pud_none(*pud))
 		return -1;
 
