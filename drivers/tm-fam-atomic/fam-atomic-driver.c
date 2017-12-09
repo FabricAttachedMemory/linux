@@ -33,6 +33,35 @@ struct fam_atomic_args_128 {
 
 #define DEVICE_NAME "fam_atomic"
 
+/* Cacheline size on ARM64 is 64 bytes */
+#define CACHELINE_BYTES	((uintptr_t)64)
+#ifdef CONFIG_ARM64
+#define _aarch64_clean_and_invalidate(addr)\
+	asm volatile("dc\tcivac, %0" : : "r" (addr) : "memory")
+#endif
+
+static void flush_dcache_area(uint64_t phys_addr)
+{
+/*
+	uintptr_t uptr;
+	*/
+	void * mapped_cache_line;
+	uint64_t aligned_phys_addr;
+
+	if (phys_addr == 0)
+		return;
+	aligned_phys_addr = phys_addr & ~(CACHELINE_BYTES - 1);
+	mapped_cache_line = ioremap_cache(aligned_phys_addr, CACHELINE_BYTES);
+
+#ifdef CONFIG_ARM64
+	_aarch64_clean_and_invalidate((char *)mapped_cache_line);
+#endif
+#ifdef CONFIG_X86_64
+	clflush((char *)mapped_cache_line);
+#endif
+	iounmap(mapped_cache_line);
+}
+
 #define _FAM_ATOMIC_MAGIC                       0xaa
 #define _FAM_ATOMIC_32_FETCH_AND_ADD_NR         0x11
 #define _FAM_ATOMIC_64_FETCH_AND_ADD_NR         0x12
@@ -62,6 +91,10 @@ struct fam_atomic_args_128 {
 
 /* p0 = *offset */
 #define FAM_ATOMIC_128_READ                     _FAM_ATOMIC_R(_FAM_ATOMIC_128_READ_NR, struct fam_atomic_args_128)
+
+/* Base address to the WRITE_COMMIT HSRs */
+static void *write_commit_base;
+#define SIZEOF_WRITE_COMMIT_REGISTER	65536
 
 /* Base address to the atomic HSRs */
 static void *atomic_base;
@@ -93,7 +126,8 @@ static void *atomic_base;
 extern int lfs_obtain_lza_and_book_offset(struct file *vm_file,
 					  uint64_t file_offset,
 					  uint64_t *book_aligned_lza,
-					  uint64_t *book_offset);
+					  uint64_t *book_offset,
+					  uint64_t *book_pa);
 
 int fam_atomic_open(struct inode *inode, struct file *file)
 {
@@ -111,8 +145,8 @@ static int fam_atomic_release(struct inode *inode, struct file *file)
 static inline unsigned long va_to_pa(unsigned long virt_addr)
 {
 	unsigned long phys_addr, offset, pfn, address;
+	struct mm_struct *mm = current->mm;
 	pgd_t *pgd;
-	p4d_t *p4d;
 	pud_t *pud;
 	pmd_t *pmd;
 	pte_t *ptep;
@@ -121,15 +155,11 @@ static inline unsigned long va_to_pa(unsigned long virt_addr)
 	offset = virt_addr % PAGE_SIZE;
 	address = virt_addr - offset;
 
-	pgd = pgd_offset_k(address);
+	pgd = pgd_offset(mm, address);
 	if (pgd_none(*pgd))
 		return -1;
 
-	p4d = p4d_offset(pgd, address);
-	if (p4d_none(*p4d))
-		return -1;
-
-	pud = pud_offset(p4d, address);
+	pud = pud_offset(pgd, address);
 	if (pud_none(*pud))
 		return -1;
 
@@ -164,9 +194,9 @@ unsigned long zbridge_va_to_lza(unsigned long virt_addr)
 }
 */
 
-uint64_t lfs_offset_to_lza(int lfs_fd, int64_t offset)
+uint64_t lfs_offset_to_lza(int lfs_fd, int64_t offset, uint64_t *pa)
 {
-	uint64_t lza, book_aligned_lza, book_offset;
+	uint64_t lza, book_aligned_lza, book_offset, book_pa;
 	struct file *vm_file;
 	int ret;
 
@@ -177,13 +207,16 @@ uint64_t lfs_offset_to_lza(int lfs_fd, int64_t offset)
 	if (!vm_file)
 		return (uint64_t)-1;
 
+    *pa = 0; 
+
 	/*
 	 * Get the book LZA and book offset given the LFS
 	 * file descriptor and file offset.
 	 */
 	ret = lfs_obtain_lza_and_book_offset(vm_file, offset,
 					     &book_aligned_lza,
-					     &book_offset);
+					     &book_offset,
+						 &book_pa);
 	fput(vm_file);
 
 	/*
@@ -192,6 +225,7 @@ uint64_t lfs_offset_to_lza(int lfs_fd, int64_t offset)
 	if (ret)
 		return (uint64_t)-1;
 
+	*pa = book_pa;
 	lza = (book_aligned_lza | book_offset);
 
 	return lza;
@@ -242,14 +276,18 @@ static inline void write128(__uint128_t val, __uint128_t *ptr)
 	mb();							\
 })
 
-static int32_t zbridge_atomic_32(unsigned long lza, int32_t p32_0, int32_t p32_1,
-				 unsigned int ioctl_num)
+static int32_t zbridge_atomic_32(uint64_t lza, int32_t p32_0, int32_t p32_1,
+				 unsigned int ioctl_num, uint64_t book_pa)
 {
-	void *atomic_register, *result_register;
+	void *atomic_register, *result_register, *wr_commit_register;
 	int32_t prev = 0;
+	int64_t wrcommit = 0;
 	__uint128_t param0 = 0;
+	__uint128_t paramL = 0;
+	int cur_cpu;
 
-	preempt_disable();
+	/* get_cpu() does preempt_disable() and must be matched with put_cpu */
+	cur_cpu = get_cpu();
 
 	if (ioctl_num != FAM_ATOMIC_32_COMPARE_AND_STORE)
 		p32_1 = 0;
@@ -260,10 +298,22 @@ static int32_t zbridge_atomic_32(unsigned long lza, int32_t p32_0, int32_t p32_1
 	 */
 	param0 |= ((__uint128_t)((uint32_t)p32_0)) << 96;
 	param0 |= ((__uint128_t)((uint32_t)p32_1)) << 32;
+	paramL = (__uint128_t)lza;
 
-	atomic_register = atomic_base + (get_cpu() * SIZEOF_ATOMIC_REGISTER);
+
+	/* 
+	 * Before programming the atomic engine, all possible synchronization
+	 * is done.
+	 */
+	wr_commit_register = write_commit_base + (cur_cpu * SIZEOF_WRITE_COMMIT_REGISTER);
+	if (book_pa)
+		flush_dcache_area(book_pa);
+	dsb(sy);
+	wrcommit = readq(wr_commit_register);
+	dsb(sy);
+	atomic_register = atomic_base + (cur_cpu * SIZEOF_ATOMIC_REGISTER);
 	write128(param0, atomic_register + P0_OFFSET);
-	write128(lza, atomic_register + ADDRESS_OFFSET);
+	write128(paramL, atomic_register + ADDRESS_OFFSET);
 
 	switch (ioctl_num) {
 	case FAM_ATOMIC_32_SWAP:
@@ -280,24 +330,30 @@ static int32_t zbridge_atomic_32(unsigned long lza, int32_t p32_0, int32_t p32_1
 
 	default:
 		printk(KERN_DEBUG "ERROR: zbridge_atomic_32() invalid ioctl_num");
+		put_cpu();
 		return -1;
 	}
 
 	prev = readl(result_register);
 
-	preempt_enable();
+	dsb(sy);
+	put_cpu();
 
 	return prev;
 }
 
-static int64_t zbridge_atomic_64(unsigned long lza, int64_t p64_0, int64_t p64_1,
-				 unsigned int ioctl_num)
+static int64_t zbridge_atomic_64(uint64_t lza, int64_t p64_0, int64_t p64_1,
+				 unsigned int ioctl_num, uint64_t book_pa)
 {
-	void *atomic_register, *result_register;
+	void *atomic_register, *result_register, *wr_commit_register;
 	int64_t prev = 0;
+	int64_t wrcommit = 0;
 	__uint128_t param0 = 0;
+	__uint128_t paramL = 0;
+	int cur_cpu;
 
-	preempt_disable();
+	/* get_cpu() does preempt_disable() and must be matched with put_cpu */
+	cur_cpu = get_cpu();
 
 	if (ioctl_num != FAM_ATOMIC_64_COMPARE_AND_STORE)
 		p64_1 = 0;
@@ -308,10 +364,17 @@ static int64_t zbridge_atomic_64(unsigned long lza, int64_t p64_0, int64_t p64_1
 	 */
 	param0 |= ((__uint128_t)((uint64_t)p64_0)) << 64;
 	param0 |= ((__uint128_t)((uint64_t)p64_1));
+	paramL = (__uint128_t)lza;
 
-	atomic_register = atomic_base + (get_cpu() * SIZEOF_ATOMIC_REGISTER);
+	wr_commit_register = write_commit_base + (cur_cpu * SIZEOF_WRITE_COMMIT_REGISTER);
+	if (book_pa)
+		flush_dcache_area(book_pa);
+	dsb(sy);
+	wrcommit = readq(wr_commit_register);
+	dsb(sy);
+	atomic_register = atomic_base + (cur_cpu * SIZEOF_ATOMIC_REGISTER);
 	write128(param0, atomic_register + P0_OFFSET);
-	write128(lza, atomic_register + ADDRESS_OFFSET);
+	write128(paramL, atomic_register + ADDRESS_OFFSET);
 
 	switch (ioctl_num) {
 	case FAM_ATOMIC_64_SWAP:
@@ -328,12 +391,15 @@ static int64_t zbridge_atomic_64(unsigned long lza, int64_t p64_0, int64_t p64_1
 
 	default:
 		printk(KERN_DEBUG "ERROR: zbridge_atomic_64() invalid ioctl_num\n");
+		put_cpu();
 		return -1;
 	}
 
 	prev = readq(result_register);
 
-	preempt_enable();
+	dsb(sy);
+
+	put_cpu();
 
 	return prev;
 }
@@ -341,21 +407,30 @@ static int64_t zbridge_atomic_64(unsigned long lza, int64_t p64_0, int64_t p64_1
 /*
  * Results of the atomic operation are stored in the "prev" array.
  */
-static void zbridge_atomic_128(unsigned long lza, int64_t p128_0[2], int64_t p128_1[2],
-			       int64_t prev[2], unsigned int ioctl_num)
+static void zbridge_atomic_128(uint64_t lza, int64_t p128_0[2], int64_t p128_1[2],
+			       int64_t prev[2], unsigned int ioctl_num, uint64_t book_pa)
 {
-	void *atomic_register, *result_register;
+	void *atomic_register, *result_register, *wr_commit_register;
 	__uint128_t result, param0 = 0, param1 = 0;
+	int64_t wrcommit = 0;
+	int cur_cpu;
 
-	preempt_disable();
+	/* get_cpu() does preempt_disable() and must be matched with put_cpu */
+	cur_cpu = get_cpu();
 
-	atomic_register = atomic_base + (get_cpu() * SIZEOF_ATOMIC_REGISTER);
+	atomic_register = atomic_base + (cur_cpu * SIZEOF_ATOMIC_REGISTER);
+	wr_commit_register = write_commit_base + (cur_cpu * SIZEOF_WRITE_COMMIT_REGISTER);
 
 	switch (ioctl_num) {
 	case FAM_ATOMIC_128_SWAP:
 		param0 |= ((__uint128_t)((uint64_t)p128_0[1])) << 64;
 		param0 |= ((__uint128_t)((uint64_t)p128_0[0]));
 
+		if (book_pa)
+			flush_dcache_area(book_pa);
+		dsb(sy);
+		wrcommit = readq(wr_commit_register);
+		dsb(sy);
 		write128(lza, atomic_register + ADDRESS_OFFSET);
 		write128(param0, atomic_register + P0_OFFSET);
 		result_register = atomic_register + SWAP_OFFSET;
@@ -368,6 +443,11 @@ static void zbridge_atomic_128(unsigned long lza, int64_t p128_0[2], int64_t p12
 		param1 |= ((__uint128_t)((uint64_t)p128_0[1])) << 64;
 		param1 |= ((__uint128_t)((uint64_t)p128_0[0]));
 
+		if (book_pa)
+			flush_dcache_area(book_pa);
+		dsb(sy);
+		wrcommit = readq(wr_commit_register);
+		dsb(sy);
 		write128(lza, atomic_register + ADDRESS_OFFSET);
 		write128(param0, atomic_register + P0_OFFSET);
 		write128(param1, atomic_register + P1_OFFSET);
@@ -375,18 +455,25 @@ static void zbridge_atomic_128(unsigned long lza, int64_t p128_0[2], int64_t p12
 		break;
 
 	case FAM_ATOMIC_128_READ:
+		if (book_pa)
+			flush_dcache_area(book_pa);
+		dsb(sy);
+		wrcommit = readq(wr_commit_register);
+		dsb(sy);
 		write128(lza, atomic_register + ADDRESS_OFFSET);
 		result_register = atomic_register + READ_OFFSET;
 		break;
 
 	default:
 		printk(KERN_DEBUG "ERROR: zbridge_atomic_64() invalid ioctl_num\n");
+		put_cpu();
 		return;
 	}
 
 	result = read128((__uint128_t *)result_register);
 
-	preempt_enable();
+	dsb(sy);
+	put_cpu();
 
 	prev[0] = ((uint64_t *)&result)[0];
 	prev[1] = ((uint64_t *)&result)[1];
@@ -399,25 +486,28 @@ static void zbridge_atomic_128(unsigned long lza, int64_t p128_0[2], int64_t p12
 static int __ioctl_32(struct fam_atomic_args_32 *args_ptr, unsigned int ioctl_num)
 {
 	struct fam_atomic_args_32 args, result;
-	uint64_t lza;
+	uint64_t lza, book_pa;
 	int ret;
 
 	ret = copy_from_user(&args, (void __user *)args_ptr, sizeof(args));
-	if (ret)
+	if (ret) {
 		return -EFAULT;
+	}
 
-	lza = lfs_offset_to_lza(args.lfs_fd, args.offset);
-	if (lza == (unsigned long)-1)
+	lza = lfs_offset_to_lza(args.lfs_fd, args.offset, &book_pa);
+	if (lza == (uint64_t)-1) {
 		return -EFAULT;
+	}
 
-	result.p32_0 = zbridge_atomic_32(lza, args.p32_0, args.p32_1, ioctl_num);
+	result.p32_0 = zbridge_atomic_32(lza, args.p32_0, args.p32_1, ioctl_num, book_pa);
 
 	/*
 	 * Write back results to user space.
 	 */
 	ret = copy_to_user(args_ptr, &result, sizeof(result));
-	if (ret)
+	if (ret) {
 		return -EFAULT;
+	}
 
 	return 0;
 }
@@ -425,18 +515,18 @@ static int __ioctl_32(struct fam_atomic_args_32 *args_ptr, unsigned int ioctl_nu
 static int __ioctl_64(struct fam_atomic_args_64 *args_ptr, unsigned int ioctl_num)
 {
 	struct fam_atomic_args_64 args, result;
-	uint64_t lza;
+	uint64_t lza, book_pa;
 	int ret;
 
 	ret = copy_from_user(&args, (void __user *)args_ptr, sizeof(args));
 	if (ret)
 		return -EFAULT;
 
-	lza = lfs_offset_to_lza(args.lfs_fd, args.offset);
-	if (lza == (unsigned long)-1)
+	lza = lfs_offset_to_lza(args.lfs_fd, args.offset, &book_pa);
+	if (lza == (uint64_t)-1)
 		return -EFAULT;
 
-	result.p64_0 = zbridge_atomic_64(lza, args.p64_0, args.p64_1, ioctl_num);
+	result.p64_0 = zbridge_atomic_64(lza, args.p64_0, args.p64_1, ioctl_num, book_pa);
 
 	ret = copy_to_user(args_ptr, &result, sizeof(result));
 	if (ret)
@@ -448,7 +538,7 @@ static int __ioctl_64(struct fam_atomic_args_64 *args_ptr, unsigned int ioctl_nu
 static int __ioctl_128(struct fam_atomic_args_128 *args_ptr, unsigned int ioctl_num)
 {
 	struct fam_atomic_args_128 args, result;
-	uint64_t lza;
+	uint64_t lza, book_pa;
 	int ret;
 	int64_t prev[2];
 
@@ -458,11 +548,11 @@ static int __ioctl_128(struct fam_atomic_args_128 *args_ptr, unsigned int ioctl_
 	if (ret)
 		return -EFAULT;
 
-	lza = lfs_offset_to_lza(args.lfs_fd, args.offset);
-	if (lza == (unsigned long)-1)
+	lza = lfs_offset_to_lza(args.lfs_fd, args.offset, &book_pa);
+	if (lza == (uint64_t)-1)
 		return -EFAULT;
 
-	zbridge_atomic_128(lza, args.p128_0, args.p128_1, prev, ioctl_num);
+	zbridge_atomic_128(lza, args.p128_0, args.p128_1, prev, ioctl_num, book_pa);
 
 	result.p128_0[0] = prev[0];
 	result.p128_0[1] = prev[1];
@@ -520,7 +610,7 @@ long fam_atomic_ioctl(struct file *file, unsigned int ioctl_num, unsigned long a
 		break;
 
 	default:
-		printk(KERN_INFO "error: fam_atomic_ioctl: invalid ioctl_num\n");
+		printk(KERN_INFO "ERROR: fam_atomic_ioctl: invalid ioctl_num\n");
 		ret = -1;
 		break;
 	}
@@ -538,8 +628,15 @@ struct cdev c_dev;
 static struct class *cl;
 static dev_t first;
 
+static int fam_atomic_uevent(struct device *dev, struct kobj_uevent_env *env)
+{
+	add_uevent_var(env, "DEVMODE=%#o", 0644);
+	return 0;
+}
+
 static int fam_atomic_init(void)
 {
+
 	if (alloc_chrdev_region(&first, 0, 1, DEVICE_NAME) < 0) {
 		printk(KERN_INFO "alloc_chrdev_region error\n");
 		return -1;
@@ -559,6 +656,9 @@ static int fam_atomic_init(void)
 		printk(KERN_INFO "class_create error\n");
 		return -1;
 	}
+	/* Set default permissions to 644 */
+	cl->dev_uevent = fam_atomic_uevent;
+
 
 	if (device_create(cl, NULL, first, NULL, DEVICE_NAME) == NULL) {
 		class_destroy(cl);
@@ -567,7 +667,11 @@ static int fam_atomic_init(void)
 		return -1;
 	}
 
+/*
 	atomic_base = (void *)ioremap(0xEFB60000000, 67108863);
+*/
+	atomic_base = (void *)ioremap_nocache(0xEFB60000000, 8388608);
+	write_commit_base = (void *)ioremap_nocache(0xEFB5C000000, 8388608);
 
 	return 0;
 }
