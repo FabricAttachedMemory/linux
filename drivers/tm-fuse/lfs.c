@@ -941,7 +941,6 @@ ssize_t lfs_file_read_write(
  * @book_aligned_lza: book aligned LZA for a given shelf offset
  * @book_offset:      byte offset within the book for a given shelf offset
  			FIXME that's not what the math is doing!!!
- * @book_pa:      physical address of the mapped offset. Can be 0.
  *
  * Wrapper for obtain_lza_map_addr() for actors that ignore map_addr and don't
  * reserve a descriptor.  The only known caller is the atomics driver.
@@ -954,11 +953,10 @@ int lfs_obtain_lza_and_book_offset(
 	struct file *file,
 	uint64_t file_offset,
 	uint64_t *book_aligned_lza,
-	uint64_t *book_offset,
-	uint64_t *book_pa)
+	uint64_t *book_offset)
 {
 	struct inode *inode = file->f_inode;
-	unsigned long pa, lza = BAD_LZA;
+	unsigned long junk, lza = BAD_LZA;
 	void (*up_book2lza)(struct rw_semaphore *sem);
 	int ret = 0;
 
@@ -969,7 +967,7 @@ int lfs_obtain_lza_and_book_offset(
 
 	ret = lfs_obtain_lza_map_addr(inode, file_offset,
 		current->comm, current->pid,
-		&lza, &pa, &up_book2lza);
+		&lza, &junk, &up_book2lza);
 	if (ret == LZA_MAP_ADDR_FALLBACK)
 		ret = -EINVAL;	/* not in this address mode */
 	if (ret < 0)
@@ -978,23 +976,7 @@ int lfs_obtain_lza_and_book_offset(
 
 	*book_aligned_lza = (uint64_t) lza;
 	*book_offset = (uint64_t) (file_offset % G.book_size);
-	*book_pa = (uint64_t) pa;
 	up_book2lza(&lfs_book2lza_rw_sema);
-	if (pa == 0) {
-		int desbk_slot;
-		uint64_t evicted_lza;
-
-		/* desbk_get_slot holds a lock. */
-		if ((ret = desbk_get_slot(lza, inode, &desbk_slot, &evicted_lza)) < 0) {
-			printk(KERN_DEBUG "    desbk_get_slot failed\n");
-					return ret;
-		}
-		*book_pa = G.aper_base + (desbk_slot * G.book_size) +
-			(file_offset % G.book_size);
-
-		/* release lock */
-		desbk_put_slot(-1, 0, inode);
-	}
 	return 0;	/* success; ignore minor/major fault status */
 }
 EXPORT_SYMBOL(lfs_obtain_lza_and_book_offset);

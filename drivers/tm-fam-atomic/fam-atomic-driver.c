@@ -40,28 +40,6 @@ struct fam_atomic_args_128 {
 	asm volatile("dc\tcivac, %0" : : "r" (addr) : "memory")
 #endif
 
-static void flush_dcache_area(uint64_t phys_addr)
-{
-/*
-	uintptr_t uptr;
-	*/
-	void * mapped_cache_line;
-	uint64_t aligned_phys_addr;
-
-	if (phys_addr == 0)
-		return;
-	aligned_phys_addr = phys_addr & ~(CACHELINE_BYTES - 1);
-	mapped_cache_line = ioremap_cache(aligned_phys_addr, CACHELINE_BYTES);
-
-#ifdef CONFIG_ARM64
-	_aarch64_clean_and_invalidate((char *)mapped_cache_line);
-#endif
-#ifdef CONFIG_X86_64
-	clflush((char *)mapped_cache_line);
-#endif
-	iounmap(mapped_cache_line);
-}
-
 #define _FAM_ATOMIC_MAGIC                       0xaa
 #define _FAM_ATOMIC_32_FETCH_AND_ADD_NR         0x11
 #define _FAM_ATOMIC_64_FETCH_AND_ADD_NR         0x12
@@ -126,8 +104,7 @@ static void *atomic_base;
 extern int lfs_obtain_lza_and_book_offset(struct file *vm_file,
 					  uint64_t file_offset,
 					  uint64_t *book_aligned_lza,
-					  uint64_t *book_offset,
-					  uint64_t *book_pa);
+					  uint64_t *book_offset);
 
 int fam_atomic_open(struct inode *inode, struct file *file)
 {
@@ -178,25 +155,10 @@ static inline unsigned long va_to_pa(unsigned long virt_addr)
 	return phys_addr;
 }
 
-/*
-unsigned long zbridge_va_to_lza(unsigned long virt_addr)
+
+uint64_t lfs_offset_to_lza(int lfs_fd, int64_t offset)
 {
-	unsigned long phys_addr, lza;
-
-	phys_addr = va_to_pa(virt_addr);
-	if (phys_addr == -1) {
-		return -1;
-	}
-
-	lza = pa_to_lza(phys_addr);
-
-	return lza;
-}
-*/
-
-uint64_t lfs_offset_to_lza(int lfs_fd, int64_t offset, uint64_t *pa)
-{
-	uint64_t lza, book_aligned_lza, book_offset, book_pa;
+	uint64_t lza, book_aligned_lza, book_offset;
 	struct file *vm_file;
 	int ret;
 
@@ -207,16 +169,13 @@ uint64_t lfs_offset_to_lza(int lfs_fd, int64_t offset, uint64_t *pa)
 	if (!vm_file)
 		return (uint64_t)-1;
 
-    *pa = 0; 
-
 	/*
 	 * Get the book LZA and book offset given the LFS
 	 * file descriptor and file offset.
 	 */
 	ret = lfs_obtain_lza_and_book_offset(vm_file, offset,
 					     &book_aligned_lza,
-					     &book_offset,
-						 &book_pa);
+					     &book_offset);
 	fput(vm_file);
 
 	/*
@@ -225,7 +184,6 @@ uint64_t lfs_offset_to_lza(int lfs_fd, int64_t offset, uint64_t *pa)
 	if (ret)
 		return (uint64_t)-1;
 
-	*pa = book_pa;
 	lza = (book_aligned_lza | book_offset);
 
 	return lza;
@@ -277,7 +235,7 @@ static inline void write128(__uint128_t val, __uint128_t *ptr)
 })
 
 static int32_t zbridge_atomic_32(uint64_t lza, int32_t p32_0, int32_t p32_1,
-				 unsigned int ioctl_num, uint64_t book_pa)
+				 unsigned int ioctl_num)
 {
 	void *atomic_register, *result_register, *wr_commit_register;
 	int32_t prev = 0;
@@ -306,8 +264,6 @@ static int32_t zbridge_atomic_32(uint64_t lza, int32_t p32_0, int32_t p32_1,
 	 * is done.
 	 */
 	wr_commit_register = write_commit_base + (cur_cpu * SIZEOF_WRITE_COMMIT_REGISTER);
-	if (book_pa)
-		flush_dcache_area(book_pa);
 	dsb(sy);
 	wrcommit = readq(wr_commit_register);
 	dsb(sy);
@@ -333,6 +289,7 @@ static int32_t zbridge_atomic_32(uint64_t lza, int32_t p32_0, int32_t p32_1,
 		put_cpu();
 		return -1;
 	}
+	dsb(sy);
 
 	prev = readl(result_register);
 
@@ -343,7 +300,7 @@ static int32_t zbridge_atomic_32(uint64_t lza, int32_t p32_0, int32_t p32_1,
 }
 
 static int64_t zbridge_atomic_64(uint64_t lza, int64_t p64_0, int64_t p64_1,
-				 unsigned int ioctl_num, uint64_t book_pa)
+				 unsigned int ioctl_num)
 {
 	void *atomic_register, *result_register, *wr_commit_register;
 	int64_t prev = 0;
@@ -367,8 +324,6 @@ static int64_t zbridge_atomic_64(uint64_t lza, int64_t p64_0, int64_t p64_1,
 	paramL = (__uint128_t)lza;
 
 	wr_commit_register = write_commit_base + (cur_cpu * SIZEOF_WRITE_COMMIT_REGISTER);
-	if (book_pa)
-		flush_dcache_area(book_pa);
 	dsb(sy);
 	wrcommit = readq(wr_commit_register);
 	dsb(sy);
@@ -394,6 +349,7 @@ static int64_t zbridge_atomic_64(uint64_t lza, int64_t p64_0, int64_t p64_1,
 		put_cpu();
 		return -1;
 	}
+	dsb(sy);
 
 	prev = readq(result_register);
 
@@ -408,7 +364,7 @@ static int64_t zbridge_atomic_64(uint64_t lza, int64_t p64_0, int64_t p64_1,
  * Results of the atomic operation are stored in the "prev" array.
  */
 static void zbridge_atomic_128(uint64_t lza, int64_t p128_0[2], int64_t p128_1[2],
-			       int64_t prev[2], unsigned int ioctl_num, uint64_t book_pa)
+			       int64_t prev[2], unsigned int ioctl_num)
 {
 	void *atomic_register, *result_register, *wr_commit_register;
 	__uint128_t result, param0 = 0, param1 = 0;
@@ -426,8 +382,6 @@ static void zbridge_atomic_128(uint64_t lza, int64_t p128_0[2], int64_t p128_1[2
 		param0 |= ((__uint128_t)((uint64_t)p128_0[1])) << 64;
 		param0 |= ((__uint128_t)((uint64_t)p128_0[0]));
 
-		if (book_pa)
-			flush_dcache_area(book_pa);
 		dsb(sy);
 		wrcommit = readq(wr_commit_register);
 		dsb(sy);
@@ -443,8 +397,6 @@ static void zbridge_atomic_128(uint64_t lza, int64_t p128_0[2], int64_t p128_1[2
 		param1 |= ((__uint128_t)((uint64_t)p128_0[1])) << 64;
 		param1 |= ((__uint128_t)((uint64_t)p128_0[0]));
 
-		if (book_pa)
-			flush_dcache_area(book_pa);
 		dsb(sy);
 		wrcommit = readq(wr_commit_register);
 		dsb(sy);
@@ -455,8 +407,6 @@ static void zbridge_atomic_128(uint64_t lza, int64_t p128_0[2], int64_t p128_1[2
 		break;
 
 	case FAM_ATOMIC_128_READ:
-		if (book_pa)
-			flush_dcache_area(book_pa);
 		dsb(sy);
 		wrcommit = readq(wr_commit_register);
 		dsb(sy);
@@ -470,6 +420,7 @@ static void zbridge_atomic_128(uint64_t lza, int64_t p128_0[2], int64_t p128_1[2
 		return;
 	}
 
+	dsb(sy);
 	result = read128((__uint128_t *)result_register);
 
 	dsb(sy);
@@ -486,7 +437,7 @@ static void zbridge_atomic_128(uint64_t lza, int64_t p128_0[2], int64_t p128_1[2
 static int __ioctl_32(struct fam_atomic_args_32 *args_ptr, unsigned int ioctl_num)
 {
 	struct fam_atomic_args_32 args, result;
-	uint64_t lza, book_pa;
+	uint64_t lza;
 	int ret;
 
 	ret = copy_from_user(&args, (void __user *)args_ptr, sizeof(args));
@@ -494,12 +445,12 @@ static int __ioctl_32(struct fam_atomic_args_32 *args_ptr, unsigned int ioctl_nu
 		return -EFAULT;
 	}
 
-	lza = lfs_offset_to_lza(args.lfs_fd, args.offset, &book_pa);
+	lza = lfs_offset_to_lza(args.lfs_fd, args.offset);
 	if (lza == (uint64_t)-1) {
 		return -EFAULT;
 	}
 
-	result.p32_0 = zbridge_atomic_32(lza, args.p32_0, args.p32_1, ioctl_num, book_pa);
+	result.p32_0 = zbridge_atomic_32(lza, args.p32_0, args.p32_1, ioctl_num);
 
 	/*
 	 * Write back results to user space.
@@ -515,18 +466,18 @@ static int __ioctl_32(struct fam_atomic_args_32 *args_ptr, unsigned int ioctl_nu
 static int __ioctl_64(struct fam_atomic_args_64 *args_ptr, unsigned int ioctl_num)
 {
 	struct fam_atomic_args_64 args, result;
-	uint64_t lza, book_pa;
+	uint64_t lza;
 	int ret;
 
 	ret = copy_from_user(&args, (void __user *)args_ptr, sizeof(args));
 	if (ret)
 		return -EFAULT;
 
-	lza = lfs_offset_to_lza(args.lfs_fd, args.offset, &book_pa);
+	lza = lfs_offset_to_lza(args.lfs_fd, args.offset);
 	if (lza == (uint64_t)-1)
 		return -EFAULT;
 
-	result.p64_0 = zbridge_atomic_64(lza, args.p64_0, args.p64_1, ioctl_num, book_pa);
+	result.p64_0 = zbridge_atomic_64(lza, args.p64_0, args.p64_1, ioctl_num);
 
 	ret = copy_to_user(args_ptr, &result, sizeof(result));
 	if (ret)
@@ -538,7 +489,7 @@ static int __ioctl_64(struct fam_atomic_args_64 *args_ptr, unsigned int ioctl_nu
 static int __ioctl_128(struct fam_atomic_args_128 *args_ptr, unsigned int ioctl_num)
 {
 	struct fam_atomic_args_128 args, result;
-	uint64_t lza, book_pa;
+	uint64_t lza;
 	int ret;
 	int64_t prev[2];
 
@@ -548,11 +499,11 @@ static int __ioctl_128(struct fam_atomic_args_128 *args_ptr, unsigned int ioctl_
 	if (ret)
 		return -EFAULT;
 
-	lza = lfs_offset_to_lza(args.lfs_fd, args.offset, &book_pa);
+	lza = lfs_offset_to_lza(args.lfs_fd, args.offset);
 	if (lza == (uint64_t)-1)
 		return -EFAULT;
 
-	zbridge_atomic_128(lza, args.p128_0, args.p128_1, prev, ioctl_num, book_pa);
+	zbridge_atomic_128(lza, args.p128_0, args.p128_1, prev, ioctl_num);
 
 	result.p128_0[0] = prev[0];
 	result.p128_0[1] = prev[1];
