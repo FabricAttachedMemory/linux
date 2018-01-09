@@ -7142,7 +7142,7 @@ CONFIG_ZBRIDGE=m
 CONFIG_FLUSHTM=m
 CONFIG_TMFS=m
 # CONFIG_TM_MFT is not set
-CONFIG_FAM_ATOMIC=m
+# CONFIG_FAM_ATOMIC is not set
 
 #
 # Firmware Drivers
