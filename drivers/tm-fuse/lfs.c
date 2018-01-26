@@ -41,6 +41,11 @@ enum ADDRESS_MODES {	/* make sure this agrees with lfs_fuse.py */
 	MODE_FALLBACK   // Use legacy ops
 };
 
+enum BII_MODES {	/* make sure this agrees with frdnode.py */
+	MODE_LZA = 0,		// Legacy mode (IG based phys addr)
+	MODE_PHYSADDR = 1	// 990x and SD Flex mode (LZA holds phys addr)
+};
+
 #define LZA_MAP_ADDR_FALLBACK 0		// instead of a lot of comments
 
 static tmfs_global_t G = { 0, MODE_NONE, 0 };
@@ -117,7 +122,7 @@ tmfs_global_t *lfs_obtain_globals(struct inode *inode)
 		return &G;
 
 	if (spoof_getxattr(inode,
-			   "_obtain_booksize_addrmode_aperbase",
+			   "_obtain_booksize_addrmode_aperbase_biimode",
 			   resp,
 			   sizeof(resp)) < 0)
 		return NULL;
@@ -134,8 +139,11 @@ tmfs_global_t *lfs_obtain_globals(struct inode *inode)
 	if (kstrtoul(strsep(&inp, ","), 10, &tmp) < 0)
 		{ pr_err("lfs: bad aper_base\n"); return NULL; }
 	G.aper_base = tmp;
-	PR_VERBOSE1("    book_size, addr_mode, aper_base = %lu, %lu, 0x%lx\n",
-		G.book_size, G.addr_mode, G.aper_base);
+	if (kstrtoul(strsep(&inp, ","), 10, &tmp) < 0)
+		{ pr_err("lfs: bad bii_mode\n"); return NULL; }
+	G.bii_mode = tmp;
+	PR_VERBOSE1("    book_size, addr_mode, aper_base, bii_mode = %lu, %lu, 0x%lx, %lu\n",
+		book_size, G.addr_mode, G.aper_base, G.bii_mode);
 
 	memset(&(G.shadow_igstart), 0, sizeof(G.shadow_igstart));
 	if (G.addr_mode == MODE_FAME || G.addr_mode == MODE_FAME_DESC) {
@@ -161,7 +169,7 @@ tmfs_global_t *lfs_obtain_globals(struct inode *inode)
 
 int lfs_modal_lza2map_addr(
 	unsigned long file_byteoff,
-	unsigned long lza,
+	unsigned long bookID,
 	unsigned long *map_addr)
 {
 	unsigned long shelf_book_offset, ig_book_num, ig, aper_num, desc_num;
@@ -172,12 +180,18 @@ int lfs_modal_lza2map_addr(
 
 	case MODE_FAME:
 	case MODE_FAME_DESC:	// from lfs_shadow.py::shadow_offset()
-		ig_book_num = lza >> 33;	// 20-bit combo
-		ig = ig_book_num >> 13;		// top 7 bits, final
-		ig_book_num &= 8191;		// 13-bit mask, final
-		*map_addr = G.shadow_igstart[ig] +
-			    (ig_book_num * G.book_size) +
-			    shelf_book_offset;
+		if (G.bii_mode == MODE_PHYSADDR) {
+			/* BII.MODE_PHYSADDR */
+			*map_addr = bookID;
+		} else {
+			/* BII.MODE_LZA */
+			ig_book_num = bookID >> 33;	// 20-bit combo
+			ig = ig_book_num >> 13;		// top 7 bits, final
+			ig_book_num &= 8191;		// 13-bit mask, final
+			*map_addr = G.shadow_igstart[ig] +
+				(ig_book_num * G.book_size) +
+				shelf_book_offset;
+		}
 		break;
 
 	case MODE_1906_DESC:
@@ -185,7 +199,7 @@ int lfs_modal_lza2map_addr(
 		   that Zbridge driver has preprogrammed the descriptors. */
 
 		/* Extract relative book number from LZA */
-		desc_num = ((lza >> 33) & ((1 << 13) - 1));
+		desc_num = ((bookID >> 33) & ((1 << 13) - 1));
 		aper_num = desc_num;
 
 		/* Aperture physical starting address */
@@ -193,10 +207,10 @@ int lfs_modal_lza2map_addr(
 			    (aper_num * G.book_size) +
 			    shelf_book_offset;
 
-		PR_VERBOSE2("    lza = 0x%lx -> IG=%lu, IGbook=%lu\n",
-			lza,
-			((lza >> 46) & ((1 << 7) - 1)),
-			((lza >> 33) & ((1 << 13) - 1))
+		PR_VERBOSE2("    bookID = 0x%lx -> IG=%lu, IGbook=%lu\n",
+			bookID,
+			((bookID >> 46) & ((1 << 7) - 1)),
+			((bookID >> 33) & ((1 << 13) - 1))
 		);
 		PR_VERBOSE2("    desc_num = %lu\n", desc_num);
 		PR_VERBOSE2("    aper_num = %lu\n", aper_num);
