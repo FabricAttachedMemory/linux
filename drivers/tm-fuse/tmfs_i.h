@@ -88,7 +88,7 @@ struct tmfs_book2lza_data {
 #define DESCRIPTOR_SLOTS 1906
 
 typedef struct {
-	unsigned long book_size, addr_mode, aper_base;
+	unsigned long book_size, addr_mode, aper_base, bii_mode;
 	struct list_head desbk_slot2mappers[DESCRIPTOR_SLOTS];
 	unsigned long shadow_igstart[128];      // copy of lfs_shadow::_igstart
 } tmfs_global_t;

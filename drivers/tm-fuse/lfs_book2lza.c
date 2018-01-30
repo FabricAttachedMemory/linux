@@ -147,12 +147,12 @@ int lfs_book2lza_populate(struct inode *inode,
 	int nbooks, nbytes, ret;
 
 	// MFT: 40 nodes == 20,000 books.  Each element of the response array
-	// is one "compressed" book LZA.  It "feels right" to get at least
-	// 100 books in a pass.  This comes off the kernel stack of 8k so 
-	// go easy.  128 uint32_t == 512 bytes of that space.  Then a
-	// "worst case" mapping of 10k books -> 10k / 128 == 78 round trips.
+	// is one 64 bit book LZA.  It "feels right" to get at least
+	// 50 books in a pass.  This comes off the kernel stack of 8k so 
+	// go easy.  64 uint64_t == 512 bytes of that space.  Then a
+	// "worst case" mapping of 10k books -> 10k / 64 == 156 round trips.
 
-	uint32_t response[128];
+	uint64_t response[64];
 
 	PR_VERBOSE2("%s(%lu bytes @ offset 0x%lx)\n",
 		__func__, file_bytes, file_byteoff);
@@ -185,22 +185,22 @@ int lfs_book2lza_populate(struct inode *inode,
 			break;
 		}
 
-		// for each uint32 in the response array:
+		// for each uint64_t in the response array:
 		//    reconstruct the LZA, get a map_addr, and cache them
 		for (i = 0; i < nbytes / sizeof(response[0]); i++) {
-			unsigned long lza, map_addr;
+			unsigned long bookID, map_addr;
 
-			lza = (unsigned long)(response[i]) << 33;
+			bookID = (unsigned long)(response[i]);
 			PR_VERBOSE2("   book %5lu @ LZA 0x%p\n",
-				shelf_book_num, (void *)lza);
+				shelf_book_num, (void *)bookID);
 
 			// This specifically does NOT do obtain_desbk_slot!
 			// The intent of this exercise is to avoid user
 			// space interaction in page faults.
-			ret = lfs_modal_lza2map_addr(PABO, lza, &map_addr);
+			ret = lfs_modal_lza2map_addr(PABO, bookID, &map_addr);
 			if (ret < 0)
 				break;
-			lfs_book2lza_cache(inode, PABO, lza, map_addr);
+			lfs_book2lza_cache(inode, PABO, bookID, map_addr);
 
 			shelf_book_num++;
 			PABO += G->book_size;
