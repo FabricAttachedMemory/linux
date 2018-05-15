@@ -49,6 +49,11 @@ MODULE_PARM_DESC(max_user_congthresh,
  "Global limit for the maximum congestion threshold an "
  "unprivileged user can set");
 
+unsigned long long tmfs_phys_base[MAX_PHYS_RANGES];
+unsigned long long tmfs_phys_bound[MAX_PHYS_RANGES];
+module_param_array(tmfs_phys_base, ullong, NULL, 0600);
+module_param_array(tmfs_phys_bound, ullong, NULL, 0600);
+
 #define TMFS_SUPER_MAGIC 0x65735546
 
 #define TMFS_DEFAULT_BLKSIZE 512
@@ -1347,6 +1352,7 @@ static void tmfs_sysfs_cleanup(void)
 static int __init tmfs_init(void)
 {
 	int res;
+	int i;
 
 	printk(KERN_INFO "tmfs init (API version %i.%i)\n",
 	       TMFS_KERNEL_VERSION, TMFS_KERNEL_MINOR_VERSION);
@@ -1370,6 +1376,17 @@ static int __init tmfs_init(void)
 
 	sanitize_global_limit(&max_user_bgreq);
 	sanitize_global_limit(&max_user_congthresh);
+
+	for (i = 0; i < MAX_PHYS_RANGES && tmfs_phys_base[i] != 0; i++) {
+		if (tmfs_phys_base[i] >= tmfs_phys_bound[i]) {
+			pr_err("requested phys base 0x%llx >= bound 0x%llx\n",
+			       tmfs_phys_base[i], tmfs_phys_bound[i]);
+			continue;
+		}
+		if (arch_io_reserve_memtype_wb(tmfs_phys_base[i], tmfs_phys_bound[i] - tmfs_phys_base[i]))
+			pr_err("failed to set write-back in region 0x%llx - 0x%llx\n",
+			       tmfs_phys_base[i], tmfs_phys_bound[i]);
+	}
 
 	lfs_vma_list_setup();  //LFS
 
@@ -1403,7 +1420,15 @@ static int __init tmfs_init(void)
 
 static void __exit tmfs_exit(void)
 {
+	int i;
+
 	printk(KERN_DEBUG "tmfs exit\n");
+
+	for (i = 0; i < MAX_PHYS_RANGES && tmfs_phys_base[i] != 0; i++) {
+		if (tmfs_phys_base[i] >= tmfs_phys_bound[i])
+			continue;
+		arch_io_free_memtype_wb(tmfs_phys_base[i], tmfs_phys_bound[i] - tmfs_phys_base[i]);
+	}
 
 	tmfs_ctl_cleanup();
 	tmfs_sysfs_cleanup();

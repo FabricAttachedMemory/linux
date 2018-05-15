@@ -66,6 +66,11 @@ extern struct mutex tmfs_mutex;
 extern unsigned max_user_bgreq;
 extern unsigned max_user_congthresh;
 
+#define MAX_PHYS_RANGES		128
+
+extern unsigned long long tmfs_phys_base[MAX_PHYS_RANGES];
+extern unsigned long long tmfs_phys_bound[MAX_PHYS_RANGES];
+
 /* One forget request */
 struct tmfs_forget_link {
 	struct tmfs_forget_one forget_one;
